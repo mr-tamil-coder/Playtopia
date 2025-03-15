@@ -19,7 +19,7 @@ function PDFProcessingGame() {
   const [activeTab, setActiveTab] = useState("text");
   const [error, setError] = useState("");
   const [selectedAnswers, setSelectedAnswers] = useState({});
-  
+
   const { players, scores, roomId, joinRoom, emitEvent } = useSocketRoom();
 
   const handleFileChange = (selectedFile, errorMsg = "") => {
@@ -27,7 +27,7 @@ function PDFProcessingGame() {
       setError(errorMsg);
       return;
     }
-    
+
     setFile(selectedFile);
     setFileName(selectedFile?.name || "");
     setExtractedText("");
@@ -59,7 +59,7 @@ function PDFProcessingGame() {
 
       setExtractedText(result.data.extractedText);
       setMcqs(result.data.mcqs);
-      
+
       // Join the socket room
       joinRoom(result.data.roomId);
 
@@ -105,7 +105,7 @@ function PDFProcessingGame() {
   const tabs = [
     { id: "text", label: "Extracted Text" },
     { id: "mcqs", label: "Quiz" },
-    { id: "scores", label: "Scores" }
+    { id: "scores", label: "Scores" },
   ];
 
   return (
@@ -145,10 +145,10 @@ function PDFProcessingGame() {
 
       {extractedText && (
         <div className="flex-grow flex flex-col">
-          <GameTabs 
-            activeTab={activeTab} 
-            setActiveTab={setActiveTab} 
-            tabs={tabs} 
+          <GameTabs
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            tabs={tabs}
           />
 
           <div className="flex-grow overflow-y-auto">
