@@ -1,6 +1,8 @@
 import express from "express";
 import multer from "multer";
 import cors from "cors";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -8,6 +10,7 @@ import { default as pdfParse } from "pdf-parse/lib/pdf-parse.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createServer } from "http";
 import { socketInitialization } from "./socket.js";
+import { initTicTacToe } from "./ticTacToe.js";
 import dotenv from "dotenv";
 
 // Get current directory
@@ -62,9 +65,104 @@ const PORT = process.env.PORT || 3000;
 // Store active game rooms
 const gameRooms = new Map();
 
+// In-memory user store (replace with database in production)
+const users = new Map();
+
+// JWT config
+const JWT_SECRET = process.env.JWT_SECRET || "default_secret";
+const JWT_EXPIRY = "1h";
+
+// Helper to generate JWT token
+const generateToken = (userId) => {
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+};
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Auth middleware to verify JWT
+const authenticate = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "No token provided" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+// Auth routes
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password required" });
+    }
+
+    if (users.has(username)) {
+      return res.status(400).json({ error: "Username already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const userId = crypto.randomUUID();
+
+    users.set(username, {
+      id: userId,
+      username,
+      password: hashedPassword,
+    });
+
+    const token = generateToken(userId);
+
+    res.json({
+      success: true,
+      token,
+      user: { username },
+    });
+  } catch (err) {
+    console.error("Signup error:", err);
+    res.status(500).json({ error: "Signup failed" });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password required" });
+    }
+
+    const user = users.get(username);
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = generateToken(user.id);
+
+    res.json({
+      success: true,
+      token,
+      user: { username },
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
 
 // Socket initialization
 socketInitialization(server, gameRooms);
@@ -167,6 +265,16 @@ app.post("/api/upload", upload.single("pdfFile"), async (req, res) => {
     const mcqs = await generateMCQsWithGemini(extractedText);
     console.log("MCQs generated successfully");
 
+    // Extract correct answers to a separate object
+    const correctAnswers = {};
+    mcqs.forEach((mcq, index) => {
+      if (mcq.correctAnswer !== undefined) {
+        correctAnswers[index] = mcq.correctAnswer;
+      }
+      // Remove correctAnswer from mcq object to not expose answers to client
+      delete mcq.correctAnswer;
+    });
+
     // Create a new game room
     const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
     gameRooms.set(roomId, {
@@ -174,7 +282,10 @@ app.post("/api/upload", upload.single("pdfFile"), async (req, res) => {
       players: [],
       mcqs: mcqs,
       scores: {},
+      correctAnswers: correctAnswers,
       extractedText: extractedText,
+      gameStatus: "waiting", // waiting, active, completed
+      playerAnswers: {},
     });
 
     // Delete the uploaded file after processing
@@ -188,6 +299,7 @@ app.post("/api/upload", upload.single("pdfFile"), async (req, res) => {
         roomId,
         extractedText,
         mcqs,
+        correctAnswers, // Include correct answers so frontend can validate
       },
     });
   } catch (error) {
@@ -212,9 +324,9 @@ app.post("/api/upload", upload.single("pdfFile"), async (req, res) => {
               "A programming language",
               "A UI library",
             ],
-            correctAnswer: 0,
           },
         ],
+        correctAnswers: { 0: 0 }, // Add correct answers for dummy data
       },
     });
   }
@@ -226,11 +338,17 @@ app.get("/api/join/:roomId", (req, res) => {
   const room = gameRooms.get(roomId);
 
   if (room) {
+    // Create a copy of MCQs without correctAnswer field
+    const mcqsWithoutAnswers = room.mcqs.map((mcq) => {
+      const { correctAnswer, ...rest } = mcq;
+      return rest;
+    });
+
     res.json({
       success: true,
       data: {
         extractedText: room.extractedText || "Dummy extracted text",
-        mcqs: room.mcqs || [
+        mcqs: mcqsWithoutAnswers || [
           {
             question: "What is Express.js?",
             options: [
@@ -239,10 +357,12 @@ app.get("/api/join/:roomId", (req, res) => {
               "A programming language",
               "A UI library",
             ],
-            correctAnswer: 0,
           },
         ],
+        correctAnswers: room.correctAnswers || { 0: 0 }, // Send correct answers separately
         scores: room.scores || { player1: 10 },
+        gameStatus: room.gameStatus || "waiting",
+        playerCount: Array.isArray(room.players) ? room.players.length : 0,
       },
     });
   } else {
@@ -259,9 +379,9 @@ app.get("/api/join/:roomId", (req, res) => {
               "A framework",
               "A backend tool",
             ],
-            correctAnswer: 0,
           },
         ],
+        correctAnswers: { 0: 0 },
       },
     });
   }
@@ -272,13 +392,12 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", message: "PDF Processing API is running" });
 });
 
-
 // tongue twister game
 app.post("/api/twister/create", (req, res) => {
   try {
     // Generate a unique room ID
     const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-    
+
     // Create a new game room with twister-specific data
     gameRooms.set(roomId, {
       id: roomId,
@@ -292,24 +411,24 @@ app.post("/api/twister/create", (req, res) => {
         "She sells seashells by the seashore",
         "How much wood would a woodchuck chuck",
         "Peter Piper picked a peck of pickled peppers",
-        "Betty bought a bit of better butter"
+        "Betty bought a bit of better butter",
       ],
       startTime: null,
-      status: "waiting" // waiting, active, completed
+      status: "waiting", // waiting, active, completed
     });
 
     res.json({
       success: true,
       data: {
         roomId,
-        message: "Twister game room created successfully"
-      }
+        message: "Twister game room created successfully",
+      },
     });
   } catch (error) {
     console.error("Error creating twister game:", error);
     res.status(500).json({
       error: "Failed to create twister game",
-      message: error.message
+      message: error.message,
     });
   }
 });
@@ -327,17 +446,16 @@ app.get("/api/twister/join/:roomId", (req, res) => {
         maxRounds: room.maxRounds,
         status: room.status,
         playerCount: room.players.length,
-        scores: room.scores
-      }
+        scores: room.scores,
+      },
     });
   } else {
     res.status(404).json({
       error: "Twister game room not found",
-      message: "The game room does not exist or is not a twister game"
+      message: "The game room does not exist or is not a twister game",
     });
   }
 });
-
 
 app.post("/api/twister/start/:roomId", (req, res) => {
   const { roomId } = req.params;
@@ -347,29 +465,28 @@ app.post("/api/twister/start/:roomId", (req, res) => {
     room.status = "active";
     room.startTime = Date.now();
     room.currentRound = 0;
-    
+
     // Notify all players that game has started via socket
     io.to(roomId).emit("game-started", {
       currentPhrase: room.phrases[0],
       currentRound: 0,
-      maxRounds: room.maxRounds
+      maxRounds: room.maxRounds,
     });
 
     res.json({
       success: true,
       data: {
         message: "Game started successfully",
-        currentPhrase: room.phrases[0]
-      }
+        currentPhrase: room.phrases[0],
+      },
     });
   } else {
     res.status(404).json({
       error: "Twister game room not found",
-      message: "The game room does not exist or is not a twister game"
+      message: "The game room does not exist or is not a twister game",
     });
   }
 });
-
 
 app.post("/api/twister/submit/:roomId", (req, res) => {
   const { roomId } = req.params;
@@ -380,20 +497,20 @@ app.post("/api/twister/submit/:roomId", (req, res) => {
     // Calculate score based on accuracy and time
     const targetPhrase = room.phrases[room.currentRound];
     const accuracy = calculateAccuracy(attempt, targetPhrase);
-    const score = Math.round(accuracy * 100 - (timeTaken / 1000));
-    
+    const score = Math.round(accuracy * 100 - timeTaken / 1000);
+
     // Update player score
     if (!room.scores[playerId]) {
       room.scores[playerId] = 0;
     }
     room.scores[playerId] += Math.max(0, score);
-    
+
     // Notify all players of the score update
     io.to(roomId).emit("score-update", {
       playerId,
       roundScore: Math.max(0, score),
       totalScore: room.scores[playerId],
-      accuracy
+      accuracy,
     });
 
     res.json({
@@ -401,17 +518,16 @@ app.post("/api/twister/submit/:roomId", (req, res) => {
       data: {
         accuracy,
         score: Math.max(0, score),
-        totalScore: room.scores[playerId]
-      }
+        totalScore: room.scores[playerId],
+      },
     });
   } else {
     res.status(404).json({
       error: "Twister game room not found",
-      message: "The game room does not exist or is not a twister game"
+      message: "The game room does not exist or is not a twister game",
     });
   }
 });
-
 
 app.post("/api/twister/next-round/:roomId", (req, res) => {
   const { roomId } = req.params;
@@ -419,101 +535,100 @@ app.post("/api/twister/next-round/:roomId", (req, res) => {
 
   if (room && room.gameType === "twister") {
     room.currentRound++;
-    
+
     if (room.currentRound >= room.maxRounds) {
       // Game completed
       room.status = "completed";
       io.to(roomId).emit("game-completed", {
         finalScores: room.scores,
-        winner: determineWinner(room.scores)
+        winner: determineWinner(room.scores),
       });
-      
+
       res.json({
         success: true,
         data: {
           message: "Game completed",
           finalScores: room.scores,
-          winner: determineWinner(room.scores)
-        }
+          winner: determineWinner(room.scores),
+        },
       });
     } else {
       // Next round
       io.to(roomId).emit("next-round", {
         currentRound: room.currentRound,
-        currentPhrase: room.phrases[room.currentRound]
+        currentPhrase: room.phrases[room.currentRound],
       });
-      
+
       res.json({
         success: true,
         data: {
           message: "Advanced to next round",
           currentRound: room.currentRound,
-          currentPhrase: room.phrases[room.currentRound]
-        }
+          currentPhrase: room.phrases[room.currentRound],
+        },
       });
     }
   } else {
     res.status(404).json({
       error: "Twister game room not found",
-      message: "The game room does not exist or is not a twister game"
+      message: "The game room does not exist or is not a twister game",
     });
   }
 });
 
-
 function calculateAccuracy(attempt, target) {
   if (!attempt || !target) return 0;
-  
+
   // Convert both to lowercase and remove extra spaces
   const cleanAttempt = attempt.toLowerCase().trim();
   const cleanTarget = target.toLowerCase().trim();
-  
+
   if (cleanAttempt === cleanTarget) return 1; // Perfect match
-  
+
   // Calculate Levenshtein distance
-  const matrix = Array(cleanTarget.length + 1).fill().map(() => 
-    Array(cleanAttempt.length + 1).fill(0)
-  );
-  
+  const matrix = Array(cleanTarget.length + 1)
+    .fill()
+    .map(() => Array(cleanAttempt.length + 1).fill(0));
+
   for (let i = 0; i <= cleanTarget.length; i++) {
     matrix[i][0] = i;
   }
-  
+
   for (let j = 0; j <= cleanAttempt.length; j++) {
     matrix[0][j] = j;
   }
-  
+
   for (let i = 1; i <= cleanTarget.length; i++) {
     for (let j = 1; j <= cleanAttempt.length; j++) {
       const cost = cleanTarget[i - 1] === cleanAttempt[j - 1] ? 0 : 1;
       matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,      // deletion
-        matrix[i][j - 1] + 1,      // insertion
+        matrix[i - 1][j] + 1, // deletion
+        matrix[i][j - 1] + 1, // insertion
         matrix[i - 1][j - 1] + cost // substitution
       );
     }
   }
-  
+
   const distance = matrix[cleanTarget.length][cleanAttempt.length];
   const maxLength = Math.max(cleanTarget.length, cleanAttempt.length);
-  return Math.max(0, 1 - (distance / maxLength));
+  return Math.max(0, 1 - distance / maxLength);
 }
 
 // Helper function to determine winner
 function determineWinner(scores) {
   let winner = null;
   let highestScore = -1;
-  
+
   for (const [playerId, score] of Object.entries(scores)) {
     if (score > highestScore) {
       highestScore = score;
       winner = playerId;
     }
   }
-  
+
   return {
     playerId: winner,
-    score: highestScore
+    score: highestScore,
   };
 }
 

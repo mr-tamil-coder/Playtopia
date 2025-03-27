@@ -6,7 +6,9 @@ function Login({ onLogin }) {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
-  const handleSubmit = (e) => {
+  const [isSignup, setIsSignup] = useState(false)
+
+  const handleAuth = async (e) => {
     e.preventDefault()
     
     if (!username.trim() || !password.trim()) {
@@ -17,12 +19,31 @@ function Login({ onLogin }) {
     setIsLoading(true)
     setError('')
     
-    // Simulate API call
-    setTimeout(() => {
-      // For demo purposes, any login is successful
+    try {
+      const endpoint = isSignup ? '/api/auth/signup' : '/api/auth/login'
+      const response = await fetch(`http://localhost:3000${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      })
+
+      const data = await response.json()
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Authentication failed')
+      }
+
+      // Store token and user data
+      localStorage.setItem('authToken', data.token)
+      localStorage.setItem('username', username)
       onLogin({ username })
+    } catch (err) {
+      setError(err.message)
+    } finally {
       setIsLoading(false)
-    }, 1000)
+    }
   }
 
   return (
@@ -44,7 +65,7 @@ function Login({ onLogin }) {
             </div>
           )}
           
-          <form onSubmit={handleSubmit}>
+          <form onSubmit={handleAuth}>
             <div className="mb-6">
               <label htmlFor="username" className="block text-gray-300 mb-2">
                 Username
@@ -81,18 +102,27 @@ function Login({ onLogin }) {
               {isLoading ? (
                 <span className="inline-block animate-spin mr-2">⟳</span>
               ) : null}
-              {isLoading ? 'Logging in...' : 'Login'}
+              {isLoading ? (isSignup ? 'Signing up...' : 'Logging in...') : (isSignup ? 'Sign up' : 'Login')}
             </button>
           </form>
           
           <div className="mt-6 text-center">
             <p className="text-gray-400">
-              Don't have an account?{' '}
-              <button className="text-accent-400 hover:text-accent-300">
-                Sign up
+              {isSignup ? 'Already have an account? ' : "Don't have an account? "}
+              <button 
+                className="text-accent-400 hover:text-accent-300"
+                onClick={() => setIsSignup(!isSignup)}
+              >
+                {isSignup ? 'Login' : 'Sign up'}
               </button>
             </p>
           </div>
+
+          {isSignup && (
+            <div className="mt-4 text-center text-sm text-gray-400">
+              Password must be at least 6 characters
+            </div>
+          )}
         </div>
       </div>
     </div>
